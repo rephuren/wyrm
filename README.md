@@ -77,3 +77,7 @@ build/wyrm minimize --target build/target_vuln_buffer --input crashes/crash-1.bi
 - persistent-режим (один процесс, цель вызывается в цикле через `LLVMFuzzerTestOneInput`-подобный API)
 - параллельные воркеры с общим корпусом
 - CMPLOG (`-fsanitize-coverage=trace-cmp`) для обхода магических констант в сравнениях
+
+## Лицензия
+
+MIT, см. [LICENSE](LICENSE).
