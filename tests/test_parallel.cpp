@@ -92,8 +92,9 @@ TEST("parallel: два воркера находят баги и делят бю
     ParallelResult r = run_parallel(o, (dir / "seeds").string(), nullptr, nullptr);
     CHECK(r.workers == 2);
     CHECK(r.stats.runs == 12000);
-    CHECK(r.stats.crashes_found >= 2);
+    CHECK(r.stats.crashes_total >= 2);
     CHECK(!r.crashes.empty());
+    CHECK(r.stats.crashes_found == static_cast<long>(r.crashes.size()));
     for (const auto& c : r.crashes) CHECK(fs::exists(c.file));
     CHECK(count_files(dir / "crashes", "crash-w0-") + count_files(dir / "crashes", "crash-w1-") > 0);
     CHECK(count_files(dir / "corpus", "seed-") == 3);  // сиды положил один процесс, а не по копии на воркера

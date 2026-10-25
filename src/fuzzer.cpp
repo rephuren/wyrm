@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <fstream>
+#include <regex>
 #include <sstream>
 
 namespace fs = std::filesystem;
@@ -59,20 +60,55 @@ std::string Fuzzer::extract_reason(const std::string& text) const {
     return text.empty() ? "(нет вывода от санитайзера)" : text.substr(0, std::min<size_t>(160, text.size()));
 }
 
+std::string crash_signature(const std::string& reason, const std::string& crash_output, int signal) {
+    static const std::regex hex("0x[0-9a-fA-F]+");
+    static const std::regex index_num("index -?[0-9]+");
+    static const std::regex size_num("(of size|size) [0-9]+");
+    static const std::regex thread_num("T[0-9]+");
+    auto normalize = [](std::string s) {
+        s = std::regex_replace(s, hex, "0xADDR");
+        s = std::regex_replace(s, index_num, "index N");
+        s = std::regex_replace(s, size_num, "$1 N");
+        return std::regex_replace(s, thread_num, "T");
+    };
+    std::string frame;
+    std::istringstream iss(crash_output);
+    std::string line;
+    while (std::getline(iss, line)) {
+        size_t p = line.find("#0 ");
+        if (p != std::string::npos) {  // верхний кадр стека из отчёта ASan: «#0 0x... in функция файл:строка»
+            size_t in = line.find(" in ", p);
+            frame = normalize(in == std::string::npos ? line.substr(p) : line.substr(in));
+            break;
+        }
+    }
+    return normalize(reason) + "|" + frame + "|sig" + std::to_string(signal);
+}
+
 void Fuzzer::handle_result(const Bytes& input, const RunResult& r) {
+    ++stats_.crashes_total;
+    std::string reason = extract_reason(r.crash_output);
+    std::string signature = crash_signature(reason, r.crash_output, r.signal);
+    auto known = crash_index_.find(signature);
+    if (known != crash_index_.end()) {
+        ++crashes_[known->second].duplicates;  // тот же баг: файл не пишем и не перепроверяем
+        return;
+    }
     ++stats_.crashes_found;
     fs::path path = fs::path(opts_.crashes_dir) / ("crash-" + opts_.worker_tag + std::to_string(stats_.crashes_found) + ".bin");
     std::ofstream f(path, std::ios::binary);
     f.write(reinterpret_cast<const char*>(input.data()), static_cast<std::streamsize>(input.size()));
     CrashRecord rec;
     rec.file = path.string();
-    rec.reason = extract_reason(r.crash_output);
+    rec.reason = reason;
+    rec.signature = signature;
     rec.status = r.status;
     rec.signal = r.signal;
     if (verifier_ && verifier_->run(input).status != RunResult::kCrash) {
         rec.reproducible = false;  // зависит от состояния процесса: оставляем файл, но честно помечаем
         rec.reason = "[не воспроизводится в чистом процессе] " + rec.reason;
     }
+    crash_index_[signature] = crashes_.size();
     crashes_.push_back(std::move(rec));
 }
 

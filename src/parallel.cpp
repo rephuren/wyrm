@@ -61,10 +61,10 @@ void write_all(int fd, const std::string& s) {
             },
             [] { return g_child_stop != 0; });
         const Stats& s = fuzzer.stats();
-        out << "STATS\t" << s.runs << '\t' << s.crashes_found << '\t' << s.corpus_size << '\t' << s.edges_covered << '\n';
+        out << "STATS\t" << s.runs << '\t' << s.crashes_found << '\t' << s.corpus_size << '\t' << s.edges_covered << '\t' << s.crashes_total << '\n';
         for (const auto& c : fuzzer.crashes())
             out << "CRASH\t" << c.file << '\t' << flat(c.reason) << '\t' << static_cast<int>(c.status) << '\t' << c.signal << '\t'
-                << (c.reproducible ? 1 : 0) << '\n';
+                << (c.reproducible ? 1 : 0) << '\t' << c.duplicates << '\t' << flat(c.signature) << '\n';
         out << "REASON\t" << reason << '\n';
     } catch (const std::exception& e) {
         out << "ERROR\t" << flat(e.what()) << '\n';
@@ -104,7 +104,7 @@ ParallelResult run_parallel(const Options& opts, const std::string& seed_dir, co
         seeder.resume();
         seeder.seed_from_dir(seed_dir);
         result.crashes = seeder.crashes();
-        result.stats.crashes_found = seeder.stats().crashes_found;
+        result.stats.crashes_total = seeder.stats().crashes_total;
     }
 
     void* mem = mmap(nullptr, sizeof(Slot) * jobs, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -180,7 +180,7 @@ ParallelResult run_parallel(const Options& opts, const std::string& seed_dir, co
             double eps = 0;
             for (unsigned i = 0; i < jobs; ++i) {
                 s.runs += slots[i].runs;
-                s.crashes_found += slots[i].crashes;
+                s.crashes_found += slots[i].crashes;  // по воркерам: повтор того же бага у разных воркеров учтётся в итоге
                 s.corpus_size = std::max<size_t>(s.corpus_size, static_cast<size_t>(slots[i].corpus));
                 s.edges_covered = std::max<size_t>(s.edges_covered, static_cast<size_t>(slots[i].edges));
             }
@@ -209,7 +209,7 @@ ParallelResult run_parallel(const Options& opts, const std::string& seed_dir, co
             auto f = split_tabs(line);
             if (f[0] == "STATS" && f.size() >= 5) {
                 result.stats.runs += std::stol(f[1]);
-                result.stats.crashes_found += std::stol(f[2]);
+                if (f.size() >= 6) result.stats.crashes_total += std::stol(f[5]);
                 result.stats.corpus_size = std::max<size_t>(result.stats.corpus_size, static_cast<size_t>(std::stoul(f[3])));
                 result.stats.edges_covered = std::max<size_t>(result.stats.edges_covered, static_cast<size_t>(std::stoul(f[4])));
             } else if (f[0] == "CRASH" && f.size() >= 6) {
@@ -219,7 +219,19 @@ ParallelResult run_parallel(const Options& opts, const std::string& seed_dir, co
                 rec.status = static_cast<RunResult::Status>(std::stoi(f[3]));
                 rec.signal = std::stoi(f[4]);
                 rec.reproducible = f[5] == "1";
-                result.crashes.push_back(std::move(rec));
+                if (f.size() >= 8) {
+                    rec.duplicates = std::stol(f[6]);
+                    rec.signature = f[7];
+                }
+                auto same = std::find_if(result.crashes.begin(), result.crashes.end(), [&](const CrashRecord& c) {
+                    return !rec.signature.empty() && c.signature == rec.signature;
+                });
+                if (same != result.crashes.end()) {
+                    same->duplicates += rec.duplicates + 1;  // тот же баг нашёл другой воркер
+                    if (!rec.reproducible) same->reproducible = false;
+                } else {
+                    result.crashes.push_back(std::move(rec));
+                }
             } else if (f[0] == "REASON" && first_reason) {
                 result.reason = f.size() > 1 ? f[1] : "";
                 first_reason = false;
@@ -229,6 +241,7 @@ ParallelResult run_parallel(const Options& opts, const std::string& seed_dir, co
         }
         if (c.report.empty() && error.empty()) error = "воркер завершился без отчёта";
     }
+    result.stats.crashes_found = static_cast<long>(result.crashes.size());
     result.stats.elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     result.stats.exec_per_sec = result.stats.elapsed > 0 ? static_cast<double>(result.stats.runs) / result.stats.elapsed : 0.0;
     if (!error.empty()) throw std::runtime_error("воркер: " + error);

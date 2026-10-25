@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
@@ -96,7 +97,7 @@ int cmd_fuzz(int argc, char** argv) {
         if (std::chrono::duration<double>(now - last_print).count() < 0.2) return;
         last_print = now;
         std::fprintf(stderr, "\r%sзапусков: %-8ld  покрытие: %-6zu  корпус: %-6zu  крашей: %-4ld  %.0f/с%s   ", kDim, s.runs,
-                     s.edges_covered, s.corpus_size, s.crashes_found, s.exec_per_sec, kReset);
+                     s.edges_covered, s.corpus_size, std::max(s.crashes_total, s.crashes_found), s.exec_per_sec, kReset);
     };
     auto should_stop = [] { return g_stop != 0; };
 
@@ -118,9 +119,13 @@ int cmd_fuzz(int argc, char** argv) {
     }
 
     std::fprintf(stderr, "\n\n%s▓ итог (%s)%s\n", kRed, stop_reason.empty() ? "остановлено" : stop_reason.c_str(), kReset);
-    std::printf("запусков: %ld   покрытие: %zu рёбер   корпус: %zu входов   крашей: %ld   скорость: %.0f/с\n", s.runs,
-                s.edges_covered, s.corpus_size, s.crashes_found, s.exec_per_sec);
-    for (const auto& c : crashes) std::printf("  %s▓%s %s — %s\n", kRed, kReset, c.file.c_str(), c.reason.c_str());
+    std::printf("запусков: %ld   покрытие: %zu рёбер   корпус: %zu входов   уникальных крашей: %zu (всего падений: %ld)   скорость: %.0f/с\n",
+                s.runs, s.edges_covered, s.corpus_size, crashes.size(), std::max(s.crashes_total, static_cast<long>(crashes.size())), s.exec_per_sec);
+    for (const auto& c : crashes) {
+        std::printf("  %s▓%s %s — %s", kRed, kReset, c.file.c_str(), c.reason.c_str());
+        if (c.duplicates > 0) std::printf("  %s(×%ld)%s", kDim, c.duplicates + 1, kReset);
+        std::printf("\n");
+    }
     return crashes.empty() ? 0 : 1;
 }
 

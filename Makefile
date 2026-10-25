@@ -42,7 +42,7 @@ targets: $(BUILD)/target_parse_header $(BUILD)/target_vuln_buffer $(BUILD)/targe
 $(BUILD)/target_%: targets/%.cpp $(BUILD)/coverage_rt.o $(BUILD)/persistent_rt.o
 	$(CXX) -std=c++17 $(SAN_FLAGS) $< $(BUILD)/coverage_rt.o $(BUILD)/persistent_rt.o -o $@
 
-TEST_SRCS := tests/main_test.cpp tests/test_mutator.cpp tests/test_corpus.cpp tests/test_minimizer.cpp tests/test_coverage.cpp tests/test_fuzzer_e2e.cpp tests/test_persistent.cpp tests/test_parallel.cpp
+TEST_SRCS := tests/main_test.cpp tests/test_mutator.cpp tests/test_corpus.cpp tests/test_minimizer.cpp tests/test_coverage.cpp tests/test_fuzzer_e2e.cpp tests/test_persistent.cpp tests/test_parallel.cpp tests/test_dedup.cpp
 
 $(BUILD)/wyrm_tests: $(TEST_SRCS) $(CORE_OBJS) | targets
 	$(CXX) $(CXXFLAGS) -Itests $(TEST_SRCS) $(CORE_OBJS) -o $@

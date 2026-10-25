@@ -85,7 +85,8 @@ TEST("фаззер находит все три бага в vuln_buffer (overflo
         saw_asan |= c.reason.find("AddressSanitizer") != std::string::npos;
         saw_ubsan |= c.reason.find("runtime error") != std::string::npos;
     }
-    CHECK(fuzzer.stats().crashes_found >= 2);  // минимум два из трёх багов за отведённый бюджет — не флаки
+    CHECK(fuzzer.stats().crashes_total >= 2);  // падений минимум два за отведённый бюджет — не флаки
+    CHECK(fuzzer.stats().crashes_found >= 1 && fuzzer.stats().crashes_found <= fuzzer.stats().crashes_total);
     CHECK(saw_sig);
     CHECK(saw_asan || saw_ubsan);
     fs::remove_all(dir);

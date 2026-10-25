@@ -160,7 +160,8 @@ TEST("persistent: фаззер находит баги vuln_buffer и краши
     fuzzer.add_seed({'D', 1, 2, 3});
     fuzzer.add_seed({'R', 1, 2, 3, 4, 5});
     fuzzer.run(nullptr, nullptr);
-    CHECK(fuzzer.stats().crashes_found >= 2);
+    CHECK(fuzzer.stats().crashes_total >= 2);
+    CHECK(!fuzzer.crashes().empty());
     for (const auto& c : fuzzer.crashes()) CHECK(c.reproducible);
     fs::remove_all(dir);
 }
