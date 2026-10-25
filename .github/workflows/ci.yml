@@ -16,7 +16,7 @@ jobs:
       matrix:
         os: [ubuntu-latest] # macOS-раннеры списывают минуты в 10 раз дороже: на macOS проект проверяется локально
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install clang (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -32,7 +32,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Warnings as errors
         run: |
           sudo apt-get update && sudo apt-get install -y clang
