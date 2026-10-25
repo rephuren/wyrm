@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest] # macOS-раннеры списывают минуты в 10 раз дороже: на macOS проект проверяется локально
     steps:
       - uses: actions/checkout@v4
       - name: Install clang (Linux)
