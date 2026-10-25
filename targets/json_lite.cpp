@@ -85,8 +85,9 @@ struct Parser {
 
 }  // namespace
 
-int main() {
-    std::string data((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
+// Точка входа в стиле libFuzzer: main() и persistent-цикл даёт среда выполнения wyrm (persistent_rt.cpp).
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* bytes, size_t size) {
+    std::string data(reinterpret_cast<const char*>(bytes), size);
     Parser parser{data.data(), data.data() + data.size()};
     bool ok = parser.parse_value();
     std::cerr << (ok ? "ok" : "fail") << "\n";

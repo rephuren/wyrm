@@ -1,6 +1,7 @@
 #pragma once
 #include <chrono>
 #include <functional>
+#include <memory>
 
 #include "wyrm/corpus.hpp"
 #include "wyrm/coverage.hpp"
@@ -22,8 +23,9 @@ struct Stats {
 struct CrashRecord {
     std::string file;
     std::string reason;    // первая содержательная строка ASan/UBSan-отчёта
-    RunResult::Status status;
+    RunResult::Status status = RunResult::kCrash;
     int signal = 0;
+    bool reproducible = true;  // в persistent-режиме краш перепроверяется в чистом процессе
 };
 
 // Один рабочий цикл фаззера: выбрать вход, смутировать, запустить, записать находки.
@@ -34,6 +36,8 @@ public:
 
     void seed_from_dir(const std::string& dir);
     void add_seed(Bytes data);
+    // Подхватить всё, что уже лежит в папке корпуса (прошлый запуск или другие воркеры), без перезаписи файлов.
+    void resume();
     const Stats& stats() const { return stats_; }
     const std::vector<CrashRecord>& crashes() const { return crashes_; }
 
@@ -49,6 +53,10 @@ private:
     Stats stats_;
     std::vector<CrashRecord> crashes_;
     std::chrono::steady_clock::time_point start_;
+    // Проверка крашей, найденных в persistent-режиме: повтор в отдельном чистом процессе.
+    Options verify_opts_;
+    CoverageMap verify_coverage_;
+    std::unique_ptr<Executor> verifier_;
 
     void handle_result(const Bytes& input, const RunResult& r);
     std::string extract_reason(const std::string& stderr_text) const;

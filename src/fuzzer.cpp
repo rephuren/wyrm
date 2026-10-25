@@ -11,8 +11,23 @@ namespace wyrm {
 
 Fuzzer::Fuzzer(Options opts)
     : opts_(std::move(opts)), executor_(opts_, coverage_), mutator_(opts_.seed ? opts_.seed : std::random_device{}()),
-      corpus_(opts_.corpus_dir) {
+      corpus_(opts_.corpus_dir, opts_.worker_tag) {
     fs::create_directories(opts_.crashes_dir);
+    if (opts_.persistent) {
+        verify_opts_ = opts_;
+        verify_opts_.persistent = false;
+        verifier_ = std::make_unique<Executor>(verify_opts_, verify_coverage_);
+    }
+}
+
+void Fuzzer::resume() {
+    for (auto& data : corpus_.scan_new()) {
+        RunResult r = executor_.run(data);  // учитываем покрытие: иначе старые входы не считались бы «известными»
+        if (r.status == RunResult::kCrash) handle_result(data, r);
+        corpus_.add_external(std::move(data));
+    }
+    stats_.corpus_size = corpus_.size();
+    stats_.edges_covered = coverage_.total_edges();
 }
 
 void Fuzzer::seed_from_dir(const std::string& dir) {
@@ -27,6 +42,8 @@ void Fuzzer::seed_from_dir(const std::string& dir) {
 }
 
 void Fuzzer::add_seed(Bytes data) {
+    for (const auto& known : corpus_.entries())
+        if (known == data) return;  // тот же сид уже в корпусе (например, повторный запуск с --seed-dir)
     RunResult r = executor_.run(data);
     corpus_.add(std::move(data));  // начальные сиды держим в корпусе всегда, даже без нового покрытия
     if (r.status == RunResult::kCrash) handle_result(corpus_.entries().back(), r);
@@ -44,7 +61,7 @@ std::string Fuzzer::extract_reason(const std::string& text) const {
 
 void Fuzzer::handle_result(const Bytes& input, const RunResult& r) {
     ++stats_.crashes_found;
-    fs::path path = fs::path(opts_.crashes_dir) / ("crash-" + std::to_string(stats_.crashes_found) + ".bin");
+    fs::path path = fs::path(opts_.crashes_dir) / ("crash-" + opts_.worker_tag + std::to_string(stats_.crashes_found) + ".bin");
     std::ofstream f(path, std::ios::binary);
     f.write(reinterpret_cast<const char*>(input.data()), static_cast<std::streamsize>(input.size()));
     CrashRecord rec;
@@ -52,18 +69,30 @@ void Fuzzer::handle_result(const Bytes& input, const RunResult& r) {
     rec.reason = extract_reason(r.crash_output);
     rec.status = r.status;
     rec.signal = r.signal;
+    if (verifier_ && verifier_->run(input).status != RunResult::kCrash) {
+        rec.reproducible = false;  // зависит от состояния процесса: оставляем файл, но честно помечаем
+        rec.reason = "[не воспроизводится в чистом процессе] " + rec.reason;
+    }
     crashes_.push_back(std::move(rec));
 }
 
 std::string Fuzzer::run(const std::function<void(const Stats&)>& progress, const std::function<bool()>& should_stop) {
     if (corpus_.empty()) corpus_.add(mutator_.random_bytes(1, 32));
     start_ = std::chrono::steady_clock::now();
+    auto last_sync = start_;
 
     while (true) {
         if (opts_.max_runs >= 0 && stats_.runs >= opts_.max_runs) return "max_runs";
         stats_.elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_).count();
         if (opts_.max_seconds >= 0 && stats_.elapsed >= opts_.max_seconds) return "max_seconds";
         if (should_stop && should_stop()) return "";
+        if (!opts_.worker_tag.empty()) {
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration<double>(now - last_sync).count() >= opts_.sync_interval) {
+                resume();  // воркеры обмениваются находками через общую папку корпуса
+                last_sync = now;
+            }
+        }
 
         const Bytes& base = corpus_.pick(mutator_.rng());
         std::uniform_int_distribution<int> splice_chance(0, 4);

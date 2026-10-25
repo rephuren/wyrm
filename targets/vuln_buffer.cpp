@@ -33,8 +33,9 @@ void bug_oob_read(const std::vector<uint8_t>& d) {
 
 }  // namespace
 
-int main() {
-    std::vector<uint8_t> d((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
+// Точка входа в стиле libFuzzer: main() и persistent-цикл даёт среда выполнения wyrm (persistent_rt.cpp).
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* bytes, size_t size) {
+    std::vector<uint8_t> d(bytes, bytes + size);
     if (d.empty()) return 0;
     switch (d[0]) {
         case 'O': bug_overflow(d); break;

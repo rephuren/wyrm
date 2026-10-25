@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+          # ASan на новых ядрах падает при высокой энтропии ASLR: известная особенность раннеров
+          sudo sysctl -w vm.mmap_rnd_bits=28 || true
+      - name: Build
+        run: make CXX=clang++ -j4 all
+      - name: Test
+        run: make CXX=clang++ test
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Warnings as errors
+        run: |
+          sudo apt-get update && sudo apt-get install -y clang
+          make CXX=clang++ CXXFLAGS="-std=c++17 -O2 -g -Wall -Wextra -Werror -Iinclude" build/wyrm
+      - name: clang-tidy (информационно)
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y clang-tidy
+          clang-tidy src/*.cpp -- -std=c++17 -Iinclude

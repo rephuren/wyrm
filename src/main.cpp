@@ -7,6 +7,7 @@
 
 #include "wyrm/fuzzer.hpp"
 #include "wyrm/minimizer.hpp"
+#include "wyrm/parallel.hpp"
 
 using namespace wyrm;
 
@@ -34,6 +35,9 @@ void print_usage() {
         "  --max-seconds <N>       остановиться через N секунд\n"
         "  --timeout <N>           таймаут одного запуска в секундах (по умолчанию 2)\n"
         "  --file-input            передавать вход через argv[1], а не stdin\n"
+        "  --persistent            один долгоживущий процесс цели (цель с LLVMFuzzerTestOneInput), в разы быстрее\n"
+        "  --persistent-iterations <N>  через сколько входов заменять процесс цели (по умолчанию 2000)\n"
+        "  --jobs <N>              параллельных воркеров с общим корпусом (по умолчанию 1)\n"
         "  --seed <N>              сид генератора случайных чисел, для воспроизводимости\n");
 }
 
@@ -69,40 +73,60 @@ Options parse_common(int argc, char** argv) {
     if (!timeout.empty()) opts.timeout_seconds = std::stod(timeout);
     std::string seed = get_opt(argc, argv, "--seed");
     if (!seed.empty()) opts.seed = std::stoull(seed);
+    opts.persistent = has_flag(argc, argv, "--persistent");
+    std::string iters = get_opt(argc, argv, "--persistent-iterations");
+    if (!iters.empty()) opts.persistent_iterations = static_cast<unsigned>(std::stoul(iters));
+    std::string jobs = get_opt(argc, argv, "--jobs");
+    if (!jobs.empty()) opts.jobs = static_cast<unsigned>(std::stoul(jobs));
     if (opts.target_path.empty()) throw std::runtime_error("нужен --target <путь>");
+    if (opts.persistent && !opts.use_stdin) throw std::runtime_error("--persistent несовместим с --file-input");
+    if (opts.jobs < 1 || opts.jobs > 256) throw std::runtime_error("--jobs должно быть от 1 до 256");
+    if (opts.persistent_iterations < 1) throw std::runtime_error("--persistent-iterations должно быть не меньше 1");
     return opts;
 }
 
 int cmd_fuzz(int argc, char** argv) {
     Options opts = parse_common(argc, argv);
-    Fuzzer fuzzer(opts);
     std::string seed_dir = get_opt(argc, argv, "--seed-dir");
-    if (!seed_dir.empty()) fuzzer.seed_from_dir(seed_dir);
-    fuzzer.seed_from_dir(opts.corpus_dir);  // продолжить с места, если корпус уже существует
 
     std::signal(SIGINT, on_sigint);
     auto last_print = std::chrono::steady_clock::now();
-    std::string stop_reason = fuzzer.run(
-        [&](const Stats& s) {
-            auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration<double>(now - last_print).count() < 0.2) return;
-            last_print = now;
-            std::fprintf(stderr, "\r%sзапусков: %-8ld  покрытие: %-6zu  корпус: %-6zu  крашей: %-4ld  %.0f/с%s   ",
-                        kDim, s.runs, s.edges_covered, s.corpus_size, s.crashes_found, s.exec_per_sec, kReset);
-        },
-        [] { return g_stop != 0; });
+    auto progress = [&](const Stats& s) {
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double>(now - last_print).count() < 0.2) return;
+        last_print = now;
+        std::fprintf(stderr, "\r%sзапусков: %-8ld  покрытие: %-6zu  корпус: %-6zu  крашей: %-4ld  %.0f/с%s   ", kDim, s.runs,
+                     s.edges_covered, s.corpus_size, s.crashes_found, s.exec_per_sec, kReset);
+    };
+    auto should_stop = [] { return g_stop != 0; };
 
-    const Stats& s = fuzzer.stats();
+    Stats s;
+    std::vector<CrashRecord> crashes;
+    std::string stop_reason;
+    if (opts.jobs > 1) {
+        ParallelResult r = run_parallel(opts, seed_dir, progress, should_stop);
+        s = r.stats;
+        crashes = std::move(r.crashes);
+        stop_reason = r.reason;
+    } else {
+        Fuzzer fuzzer(opts);
+        fuzzer.resume();  // продолжить с места, если корпус уже существует
+        if (!seed_dir.empty()) fuzzer.seed_from_dir(seed_dir);
+        stop_reason = fuzzer.run(progress, should_stop);
+        s = fuzzer.stats();
+        crashes = fuzzer.crashes();
+    }
+
     std::fprintf(stderr, "\n\n%s▓ итог (%s)%s\n", kRed, stop_reason.empty() ? "остановлено" : stop_reason.c_str(), kReset);
-    std::printf("запусков: %ld   покрытие: %zu рёбер   корпус: %zu входов   крашей: %ld   скорость: %.0f/с\n",
-               s.runs, s.edges_covered, s.corpus_size, s.crashes_found, s.exec_per_sec);
-    for (const auto& c : fuzzer.crashes())
-        std::printf("  %s▓%s %s — %s\n", kRed, kReset, c.file.c_str(), c.reason.c_str());
-    return fuzzer.crashes().empty() ? 0 : 1;
+    std::printf("запусков: %ld   покрытие: %zu рёбер   корпус: %zu входов   крашей: %ld   скорость: %.0f/с\n", s.runs,
+                s.edges_covered, s.corpus_size, s.crashes_found, s.exec_per_sec);
+    for (const auto& c : crashes) std::printf("  %s▓%s %s — %s\n", kRed, kReset, c.file.c_str(), c.reason.c_str());
+    return crashes.empty() ? 0 : 1;
 }
 
 int cmd_minimize(int argc, char** argv) {
     Options opts = parse_common(argc, argv);
+    opts.persistent = false;  // минимизация и повтор всегда в чистом процессе: так результат не зависит от прошлых входов
     std::string input_path = get_opt(argc, argv, "--input");
     std::string output_path = get_opt(argc, argv, "--output", input_path + ".min");
     if (input_path.empty()) throw std::runtime_error("нужен --input <файл>");
@@ -124,6 +148,7 @@ int cmd_minimize(int argc, char** argv) {
 
 int cmd_replay(int argc, char** argv) {
     Options opts = parse_common(argc, argv);
+    opts.persistent = false;
     std::string input_path = get_opt(argc, argv, "--input");
     if (input_path.empty()) throw std::runtime_error("нужен --input <файл>");
     Bytes input = read_file(input_path);

@@ -1,7 +1,9 @@
 #include "wyrm/executor.hpp"
 
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -10,6 +12,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <stdexcept>
+#include <vector>
+
+#include "wyrm/persistent.hpp"
 
 namespace wyrm {
 
@@ -30,9 +36,36 @@ std::string read_all(int fd, size_t limit) {
 
 Executor::Executor(const Options& opts, CoverageMap& coverage) : opts_(opts), coverage_(coverage) {
     shm_env_ = "WYRM_SHM_ID=" + coverage_.shm_name();
+    if (opts_.persistent) signal(SIGPIPE, SIG_IGN);  // запись в канал упавшей цели не должна убивать фаззер
+}
+
+Executor::~Executor() {
+    stop_child(true);
+    if (input_map_) munmap(input_map_, kInputShmSize);
+    if (input_fd_ >= 0) close(input_fd_);
+    if (!input_name_.empty()) unlink(input_name_.c_str());
+    if (err_fd_ >= 0) close(err_fd_);
 }
 
 RunResult Executor::run(const Bytes& input) {
+    if (opts_.persistent && input.size() <= kMaxPersistentInput) return run_persistent(input);
+    return run_once(input);
+}
+
+void Executor::classify(int status, RunResult& result) {
+    if (WIFSIGNALED(status)) {
+        result.status = RunResult::kCrash;
+        result.signal = WTERMSIG(status);
+        return;
+    }
+    int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    result.exit_code = code;
+    if (code == 127) throw std::runtime_error("цель не запустилась (exec вернул 127): проверьте путь --target");
+    // ASAN_OPTIONS=exitcode=134: явный код краша, который не спутать с обычным ненулевым выходом цели.
+    result.status = (code == 134) ? RunResult::kCrash : RunResult::kOk;
+}
+
+RunResult Executor::run_once(const Bytes& input) {
     coverage_.clear();
     RunResult result;
 
@@ -43,7 +76,12 @@ RunResult Executor::run(const Bytes& input) {
         tmpl.push_back('\0');
         int fd = mkstemp(tmpl.data());
         if (fd < 0) throw std::runtime_error("mkstemp для входного файла не удался");
-        write(fd, input.data(), input.size());
+        size_t written = 0;
+        while (written < input.size()) {
+            ssize_t n = write(fd, input.data() + written, input.size() - written);
+            if (n <= 0) break;
+            written += static_cast<size_t>(n);
+        }
         close(fd);
         tmp_input_path.assign(tmpl.data());
     }
@@ -125,15 +163,158 @@ RunResult Executor::run(const Bytes& input) {
 
     if (timed_out) {
         result.status = RunResult::kTimeout;
-    } else if (WIFSIGNALED(status)) {
-        result.status = RunResult::kCrash;
-        result.signal = WTERMSIG(status);
     } else {
-        int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-        result.exit_code = code;
-        // ASAN_OPTIONS=exitcode=134 выше: явный код краша, который exit() не спутает со сбойным,
-        // но не аварийным завершением пользовательского кода.
-        result.status = (code == 134) ? RunResult::kCrash : RunResult::kOk;
+        classify(status, result);
+    }
+    result.new_edges = coverage_.merge_new_edges();
+    return result;
+}
+
+void Executor::ensure_persistent_resources() {
+    if (input_map_) return;
+    char tmpl[] = "/tmp/wyrm_in_XXXXXX";
+    int fd = mkstemp(tmpl);
+    if (fd < 0) throw std::runtime_error("mkstemp для общей памяти входа не удался");
+    if (ftruncate(fd, static_cast<off_t>(kInputShmSize)) != 0) {
+        close(fd);
+        unlink(tmpl);
+        throw std::runtime_error("ftruncate для общей памяти входа не удался");
+    }
+    void* addr = mmap(nullptr, kInputShmSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (addr == MAP_FAILED) {
+        close(fd);
+        unlink(tmpl);
+        throw std::runtime_error("mmap для общей памяти входа не удался");
+    }
+    input_fd_ = fd;
+    input_map_ = static_cast<uint8_t*>(addr);
+    input_name_ = tmpl;
+
+    // stderr цели пишем во временный файл, а не в канал: канал переполнился бы между крашами и завис.
+    char err_tmpl[] = "/tmp/wyrm_err_XXXXXX";
+    int efd = mkstemp(err_tmpl);
+    if (efd < 0) throw std::runtime_error("mkstemp для stderr цели не удался");
+    unlink(err_tmpl);
+    int flags = fcntl(efd, F_GETFL);
+    fcntl(efd, F_SETFL, flags | O_APPEND);  // цель дописывает в конец, фаззер обнуляет файл между запусками
+    err_fd_ = efd;
+    for (int f : {input_fd_, err_fd_}) fcntl(f, F_SETFD, FD_CLOEXEC);
+}
+
+void Executor::start_child() {
+    int ctl[2], st[2];
+    if (pipe(ctl) != 0 || pipe(st) != 0) throw std::runtime_error("pipe() не удался");
+    pid_t pid = fork();
+    if (pid < 0) throw std::runtime_error("fork() не удался");
+    if (pid == 0) {
+        dup2(ctl[0], kCtlFd);
+        dup2(st[1], kStatusFd);
+        close(ctl[0]);
+        close(ctl[1]);
+        close(st[0]);
+        close(st[1]);
+        dup2(err_fd_, STDERR_FILENO);
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            dup2(devnull, STDOUT_FILENO);
+        }
+        std::string input_env = std::string(kInputShmEnv) + "=" + input_name_;
+        std::string persistent_env = std::string(kPersistentEnv) + "=1";
+        putenv(const_cast<char*>(shm_env_.c_str()));
+        putenv(const_cast<char*>(input_env.c_str()));
+        putenv(const_cast<char*>(persistent_env.c_str()));
+        setenv("ASAN_OPTIONS", "abort_on_error=1:exitcode=134:detect_leaks=0", 1);
+        setenv("UBSAN_OPTIONS", "abort_on_error=1:exitcode=134", 1);
+        execl(opts_.target_path.c_str(), opts_.target_path.c_str(), nullptr);
+        _exit(127);
+    }
+    close(ctl[0]);
+    close(st[1]);
+    fcntl(ctl[1], F_SETFD, FD_CLOEXEC);
+    fcntl(st[0], F_SETFD, FD_CLOEXEC);
+    pid_ = pid;
+    ctl_w_ = ctl[1];
+    status_r_ = st[0];
+    iterations_ = 0;
+    ++restarts_;
+}
+
+void Executor::stop_child(bool kill_now) {
+    if (ctl_w_ >= 0) close(ctl_w_);  // EOF в канале команд: цель выходит сама
+    ctl_w_ = -1;
+    if (pid_ > 0) {
+        if (kill_now) kill(pid_, SIGKILL);
+        int status;
+        waitpid(pid_, &status, 0);
+    }
+    if (status_r_ >= 0) close(status_r_);
+    status_r_ = -1;
+    pid_ = -1;
+}
+
+RunResult Executor::run_persistent(const Bytes& input) {
+    ensure_persistent_resources();
+    coverage_.clear();
+    RunResult result;
+    if (pid_ < 0) start_child();
+
+    uint32_t len = static_cast<uint32_t>(input.size());
+    std::memcpy(input_map_, &len, sizeof(len));
+    if (!input.empty()) std::memcpy(input_map_ + sizeof(len), input.data(), input.size());
+    if (ftruncate(err_fd_, 0) != 0) { /* файл ошибок необязателен: хуже будет только текст отчёта */ }
+
+    auto start = std::chrono::steady_clock::now();
+    const auto deadline = start + std::chrono::duration<double>(opts_.timeout_seconds);
+
+    uint32_t cmd = 1;
+    bool alive = write(ctl_w_, &cmd, sizeof(cmd)) == static_cast<ssize_t>(sizeof(cmd));
+    bool timed_out = false, finished = false;
+    int status = 0;
+
+    while (alive && !finished) {
+        auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+        if (left <= 0) {
+            timed_out = true;
+            break;
+        }
+        pollfd pfd{status_r_, POLLIN, 0};
+        int rc = poll(&pfd, 1, static_cast<int>(left));
+        if (rc < 0) continue;  // прерван сигналом
+        if (rc == 0) {
+            timed_out = true;
+            break;
+        }
+        uint32_t done = 0;
+        ssize_t n = read(status_r_, &done, sizeof(done));
+        if (n == static_cast<ssize_t>(sizeof(done))) {
+            finished = true;
+        } else {
+            alive = false;  // EOF: процесс цели завершился посреди запуска
+        }
+    }
+
+    result.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    if (timed_out) {
+        stop_child(true);
+        result.status = RunResult::kTimeout;
+    } else if (!finished) {
+        // Цель умерла (или не приняла команду): забираем причину, процесс заменим на следующем входе.
+        if (ctl_w_ >= 0) close(ctl_w_);
+        ctl_w_ = -1;
+        waitpid(pid_, &status, 0);
+        pid_ = -1;
+        close(status_r_);
+        status_r_ = -1;
+        classify(status, result);
+        if (result.status == RunResult::kCrash) {
+            std::string out(kMaxCrashOutput, '\0');
+            ssize_t n = pread(err_fd_, out.data(), out.size(), 0);
+            out.resize(n > 0 ? static_cast<size_t>(n) : 0);
+            result.crash_output = std::move(out);
+        }
+    } else if (++iterations_ >= opts_.persistent_iterations) {
+        stop_child(false);  // плановая замена процесса: копящаяся утечка или порча состояния не должны накапливаться
     }
     result.new_edges = coverage_.merge_new_edges();
     return result;

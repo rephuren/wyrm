@@ -40,3 +40,7 @@ extern "C" void __sanitizer_cov_trace_pc_guard(uint32_t* guard) {
     m[loc ^ g_prev_loc]++;
     g_prev_loc = loc >> 1;
 }
+
+// Persistent-режим: между итерациями в одном процессе «предыдущее место» сбрасывается, иначе первое
+// ребро каждого входа зависело бы от хвоста предыдущего, и покрытие не было бы воспроизводимым.
+extern "C" void wyrm_reset_coverage_state() { g_prev_loc = 0; }

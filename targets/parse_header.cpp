@@ -25,8 +25,9 @@ bool parse(const std::vector<uint8_t>& data, Header& out) {
 
 }  // namespace
 
-int main() {
-    std::vector<uint8_t> data((std::istreambuf_iterator<char>(std::cin)), std::istreambuf_iterator<char>());
+// Точка входа в стиле libFuzzer: main() и persistent-цикл даёт среда выполнения wyrm (persistent_rt.cpp).
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* bytes, size_t size) {
+    std::vector<uint8_t> data(bytes, bytes + size);
     Header h{};
     if (parse(data, h)) std::cerr << "parsed, len=" << h.len << "\n";
     return 0;
