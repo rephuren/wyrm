@@ -30,6 +30,7 @@ struct Options {
     bool minimize_on_crash = true;
     bool use_stdin = true;          // true: вход через stdin, false: через argv[1] (путь к файлу)
     bool persistent = false;        // один долгоживущий процесс цели вместо fork+exec на каждый вход
+    bool forkserver = false;        // прогретый процесс цели форкается на каждый вход (без exec); несовместим с persistent
     unsigned persistent_iterations = 2000;  // после стольких входов процесс цели заменяется новым
     std::string worker_tag;         // пусто в одиночном режиме; "w1-" и т. п. у воркера параллельного фаззинга
     double sync_interval = 1.0;     // как часто воркер подтягивает чужие входы из общего корпуса, секунды

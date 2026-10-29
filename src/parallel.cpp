@@ -100,6 +100,7 @@ ParallelResult run_parallel(const Options& opts, const std::string& seed_dir, co
         Options so = opts;
         so.worker_tag.clear();
         so.persistent = false;
+        so.forkserver = false;
         Fuzzer seeder(so);
         seeder.resume();
         seeder.seed_from_dir(seed_dir);

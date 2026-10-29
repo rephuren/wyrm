@@ -8,10 +8,12 @@
 
 namespace wyrm {
 
-// Запускает цель на входе и собирает покрытие. Два режима (Options::persistent):
+// Запускает цель на входе и собирает покрытие. Три режима:
 //  - по умолчанию: отдельный процесс на каждый вход (fork+exec): просто и надёжно, но медленно;
 //  - persistent: один долгоживущий процесс, вход приходит через общую память, команды по каналу.
-//    Крашится или зависает цель, её процесс заменяется, а вердикт возвращается как обычно.
+//    Крашится или зависает цель, её процесс заменяется, а вердикт возвращается как обычно;
+//  - fork-сервер (Options::forkserver): один прогретый процесс-сервер, на каждый вход он делает fork(). Падение или
+//    зависание касается только потомка, сервер живёт дальше, а состояние между входами не накапливается.
 class Executor {
 public:
     Executor(const Options& opts, CoverageMap& coverage);
@@ -21,8 +23,12 @@ public:
 
     RunResult run(const Bytes& input);
 
-    // Сколько раз пришлось запускать процесс цели заново (для persistent: после краша, таймаута или по лимиту итераций).
+    // Сколько раз пришлось запускать процесс цели заново (для persistent: после краша, таймаута или по лимиту итераций;
+    // для fork-сервера: сколько раз стартовал сам сервер).
     long restarts() const { return restarts_; }
+
+    // pid живого процесса цели (persistent-процесс или fork-сервер), либо -1. Нужен тестам, чтобы убить его снаружи.
+    pid_t child_pid() const { return pid_; }
 
 private:
     const Options& opts_;
@@ -42,6 +48,8 @@ private:
 
     RunResult run_once(const Bytes& input);
     RunResult run_persistent(const Bytes& input);
+    RunResult run_forkserver(const Bytes& input);
+    bool await_hello();
     void ensure_persistent_resources();
     void start_child();
     void stop_child(bool kill_now);

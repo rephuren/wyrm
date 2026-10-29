@@ -36,7 +36,7 @@ std::string read_all(int fd, size_t limit) {
 
 Executor::Executor(const Options& opts, CoverageMap& coverage) : opts_(opts), coverage_(coverage) {
     shm_env_ = "WYRM_SHM_ID=" + coverage_.shm_name();
-    if (opts_.persistent) signal(SIGPIPE, SIG_IGN);  // запись в канал упавшей цели не должна убивать фаззер
+    if (opts_.persistent || opts_.forkserver) signal(SIGPIPE, SIG_IGN);  // запись в канал упавшей цели не должна убивать фаззер
 }
 
 Executor::~Executor() {
@@ -48,6 +48,7 @@ Executor::~Executor() {
 }
 
 RunResult Executor::run(const Bytes& input) {
+    if (opts_.forkserver && input.size() <= kMaxPersistentInput) return run_forkserver(input);
     if (opts_.persistent && input.size() <= kMaxPersistentInput) return run_persistent(input);
     return run_once(input);
 }
@@ -220,7 +221,7 @@ void Executor::start_child() {
             dup2(devnull, STDOUT_FILENO);
         }
         std::string input_env = std::string(kInputShmEnv) + "=" + input_name_;
-        std::string persistent_env = std::string(kPersistentEnv) + "=1";
+        std::string persistent_env = std::string(opts_.forkserver ? kForkserverEnv : kPersistentEnv) + "=1";
         putenv(const_cast<char*>(shm_env_.c_str()));
         putenv(const_cast<char*>(input_env.c_str()));
         putenv(const_cast<char*>(persistent_env.c_str()));
@@ -315,6 +316,94 @@ RunResult Executor::run_persistent(const Bytes& input) {
         }
     } else if (++iterations_ >= opts_.persistent_iterations) {
         stop_child(false);  // плановая замена процесса: копящаяся утечка или порча состояния не должны накапливаться
+    }
+    result.new_edges = coverage_.merge_new_edges();
+    return result;
+}
+
+namespace {
+
+enum class Wait { kOk, kTimeout, kEof };
+
+// Читает 4 байта из канала до момента deadline.
+Wait read_word(int fd, std::chrono::steady_clock::time_point deadline, uint32_t& out) {
+    for (;;) {
+        auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+        if (left <= 0) return Wait::kTimeout;
+        pollfd pfd{fd, POLLIN, 0};
+        int rc = poll(&pfd, 1, static_cast<int>(left));
+        if (rc < 0) continue;  // прерван сигналом
+        if (rc == 0) return Wait::kTimeout;
+        return read(fd, &out, sizeof(out)) == static_cast<ssize_t>(sizeof(out)) ? Wait::kOk : Wait::kEof;
+    }
+}
+
+}  // namespace
+
+// Ждёт приветствие нового сервера. Если цель не запустилась или упала до приветствия, это ошибка запуска, а не вердикт по входу.
+bool Executor::await_hello() {
+    uint32_t hello = 0;
+    Wait w = read_word(status_r_, std::chrono::steady_clock::now() + std::chrono::seconds(10), hello);
+    if (w == Wait::kOk) return true;
+    stop_child(true);
+    return false;
+}
+
+RunResult Executor::run_forkserver(const Bytes& input) {
+    ensure_persistent_resources();
+    coverage_.clear();
+    RunResult result;
+
+    uint32_t len = static_cast<uint32_t>(input.size());
+    std::memcpy(input_map_, &len, sizeof(len));
+    if (!input.empty()) std::memcpy(input_map_ + sizeof(len), input.data(), input.size());
+
+    auto start = std::chrono::steady_clock::now();
+    uint32_t child_pid = 0;
+    for (int attempt = 0;; ++attempt) {
+        if (pid_ < 0) {
+            start_child();
+            if (!await_hello()) throw std::runtime_error("fork-сервер цели не запустился: проверьте путь --target и что цель собрана с runtime wyrm");
+        }
+        if (ftruncate(err_fd_, 0) != 0) { /* файл ошибок необязателен */ }
+        uint32_t cmd = 1;
+        if (write(ctl_w_, &cmd, sizeof(cmd)) == static_cast<ssize_t>(sizeof(cmd)) &&
+            read_word(status_r_, start + std::chrono::seconds(5), child_pid) == Wait::kOk) {
+            break;
+        }
+        stop_child(true);  // сервер умер между входами: один раз пробуем с новым
+        if (attempt >= 1) throw std::runtime_error("fork-сервер цели не отвечает");
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(opts_.timeout_seconds));
+    uint32_t word = 0;
+    Wait w = read_word(status_r_, deadline, word);
+    bool timed_out = false;
+    if (w == Wait::kTimeout) {
+        timed_out = true;
+        kill(static_cast<pid_t>(child_pid), SIGKILL);  // убиваем только потомка, сервер ждёт его и отчитывается
+        w = read_word(status_r_, std::chrono::steady_clock::now() + std::chrono::seconds(2), word);
+    }
+    result.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+    if (w != Wait::kOk) {
+        stop_child(true);  // сервер пропал посреди входа: заменим на следующем
+        if (timed_out) {
+            result.status = RunResult::kTimeout;
+        } else {
+            result.status = RunResult::kCrash;
+            result.exit_code = -1;
+        }
+    } else if (timed_out) {
+        result.status = RunResult::kTimeout;
+    } else {
+        classify(static_cast<int>(word), result);
+    }
+    if (result.status == RunResult::kCrash) {
+        std::string out(kMaxCrashOutput, '\0');
+        ssize_t n = pread(err_fd_, out.data(), out.size(), 0);
+        out.resize(n > 0 ? static_cast<size_t>(n) : 0);
+        result.crash_output = std::move(out);
     }
     result.new_edges = coverage_.merge_new_edges();
     return result;

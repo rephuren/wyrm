@@ -2,6 +2,7 @@
 // Минимальный тестовый фреймворк без внешних зависимостей: регистрация через статические
 // объекты, как в Catch2/doctest, только в 40 строк.
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <string>
 #include <vector>
@@ -23,9 +24,14 @@ struct Failure {
     std::string message;
 };
 
+// WYRM_TEST_FILTER=подстрока запускает только тесты, в имени которых она есть (полный набор идёт около 8 минут).
 inline int run_all() {
     int failed = 0;
+    const char* filter = std::getenv("WYRM_TEST_FILTER");
+    size_t ran = 0;
     for (auto& c : registry()) {
+        if (filter && c.name.find(filter) == std::string::npos) continue;
+        ++ran;
         try {
             c.fn();
             std::printf("  ok    %s\n", c.name.c_str());
@@ -37,7 +43,7 @@ inline int run_all() {
             ++failed;
         }
     }
-    std::printf("%d/%zu passed\n", static_cast<int>(registry().size()) - failed, registry().size());
+    std::printf("%d/%zu passed\n", static_cast<int>(ran) - failed, ran);
     return failed;
 }
 
