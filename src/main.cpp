@@ -37,6 +37,7 @@ void print_usage() {
         "  --timeout <N>           таймаут одного запуска в секундах (по умолчанию 2)\n"
         "  --file-input            передавать вход через argv[1], а не stdin\n"
         "  --persistent            один долгоживущий процесс цели (цель с LLVMFuzzerTestOneInput), в разы быстрее\n"
+        "  --forkserver            прогретый процесс цели форкается на каждый вход: без exec и без накопления состояния\n"
         "  --persistent-iterations <N>  через сколько входов заменять процесс цели (по умолчанию 2000)\n"
         "  --jobs <N>              параллельных воркеров с общим корпусом (по умолчанию 1)\n"
         "  --seed <N>              сид генератора случайных чисел, для воспроизводимости\n");
@@ -75,11 +76,14 @@ Options parse_common(int argc, char** argv) {
     std::string seed = get_opt(argc, argv, "--seed");
     if (!seed.empty()) opts.seed = std::stoull(seed);
     opts.persistent = has_flag(argc, argv, "--persistent");
+    opts.forkserver = has_flag(argc, argv, "--forkserver");
     std::string iters = get_opt(argc, argv, "--persistent-iterations");
     if (!iters.empty()) opts.persistent_iterations = static_cast<unsigned>(std::stoul(iters));
     std::string jobs = get_opt(argc, argv, "--jobs");
     if (!jobs.empty()) opts.jobs = static_cast<unsigned>(std::stoul(jobs));
     if (opts.target_path.empty()) throw std::runtime_error("нужен --target <путь>");
+    if (opts.persistent && opts.forkserver) throw std::runtime_error("--persistent и --forkserver взаимоисключающие");
+    if (opts.forkserver && !opts.use_stdin) throw std::runtime_error("--forkserver несовместим с --file-input");
     if (opts.persistent && !opts.use_stdin) throw std::runtime_error("--persistent несовместим с --file-input");
     if (opts.jobs < 1 || opts.jobs > 256) throw std::runtime_error("--jobs должно быть от 1 до 256");
     if (opts.persistent_iterations < 1) throw std::runtime_error("--persistent-iterations должно быть не меньше 1");
@@ -131,6 +135,7 @@ int cmd_fuzz(int argc, char** argv) {
 
 int cmd_minimize(int argc, char** argv) {
     Options opts = parse_common(argc, argv);
+    opts.forkserver = false;
     opts.persistent = false;  // минимизация и повтор всегда в чистом процессе: так результат не зависит от прошлых входов
     std::string input_path = get_opt(argc, argv, "--input");
     std::string output_path = get_opt(argc, argv, "--output", input_path + ".min");
@@ -153,6 +158,7 @@ int cmd_minimize(int argc, char** argv) {
 
 int cmd_replay(int argc, char** argv) {
     Options opts = parse_common(argc, argv);
+    opts.forkserver = false;
     opts.persistent = false;
     std::string input_path = get_opt(argc, argv, "--input");
     if (input_path.empty()) throw std::runtime_error("нужен --input <файл>");
