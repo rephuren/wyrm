@@ -169,3 +169,21 @@ TEST("forkserver: фаззер находит баги vuln_buffer") {
     for (const auto& c : fuzzer.crashes()) CHECK(c.reproducible);
     fs::remove_all(dir);
 }
+
+TEST("режимы: на цели без ASan все три дают одинаковый вердикт и покрытие, fork-сервер быстрее exec") {
+    Options base;
+    base.target_path = target("plain_json_lite").string();
+    base.timeout_seconds = 2.0;
+    Options exec_o = base, fork_o = base, pers_o = base;
+    fork_o.forkserver = true;
+    pers_o.persistent = true;
+    CoverageMap c1, c2, c3;
+    Executor ee(exec_o, c1), fe(fork_o, c2), pe(pers_o, c3);
+    Bytes in = {'{', '"', 'a', '"', ':', '[', '1', ',', '2', ']', '}'};
+    RunResult a = ee.run(in), b = fe.run(in), c = pe.run(in);
+    CHECK(a.status == RunResult::kOk && b.status == RunResult::kOk && c.status == RunResult::kOk);
+    CHECK(a.new_edges > 0 && a.new_edges == b.new_edges && b.new_edges == c.new_edges);
+    double t_exec = seconds_for(ee, in, 300);
+    double t_fork = seconds_for(fe, in, 300);
+    CHECK(t_fork < t_exec);
+}
