@@ -37,10 +37,15 @@ $(BUILD)/coverage_rt.o: src/coverage_rt.cpp | $(BUILD)
 $(BUILD)/persistent_rt.o: src/persistent_rt.cpp include/wyrm/persistent.hpp | $(BUILD)
 	$(CXX) -std=c++17 -O2 -g -Iinclude -c $< -o $@
 
-targets: $(BUILD)/target_parse_header $(BUILD)/target_vuln_buffer $(BUILD)/target_json_lite $(BUILD)/target_stateful
+targets: $(BUILD)/target_parse_header $(BUILD)/target_vuln_buffer $(BUILD)/target_json_lite $(BUILD)/target_stateful $(BUILD)/plain_json_lite
 
 $(BUILD)/target_%: targets/%.cpp $(BUILD)/coverage_rt.o $(BUILD)/persistent_rt.o
 	$(CXX) -std=c++17 $(SAN_FLAGS) $< $(BUILD)/coverage_rt.o $(BUILD)/persistent_rt.o -o $@
+
+# Сборка без санитайзеров, только с покрытием: нужна, чтобы честно сравнивать режимы запуска (fork процесса с ASan дорог).
+PLAIN_FLAGS := -O2 -g -fsanitize-coverage=trace-pc-guard
+$(BUILD)/plain_%: targets/%.cpp $(BUILD)/coverage_rt.o $(BUILD)/persistent_rt.o
+	$(CXX) -std=c++17 $(PLAIN_FLAGS) $< $(BUILD)/coverage_rt.o $(BUILD)/persistent_rt.o -o $@
 
 TEST_SRCS := tests/main_test.cpp tests/test_mutator.cpp tests/test_corpus.cpp tests/test_minimizer.cpp tests/test_coverage.cpp tests/test_fuzzer_e2e.cpp tests/test_persistent.cpp tests/test_forkserver.cpp tests/test_parallel.cpp tests/test_dedup.cpp
 
